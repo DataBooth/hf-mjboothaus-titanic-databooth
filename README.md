@@ -1,26 +1,24 @@
 # `hf-mjboothaus-titanic-databooth`
 
-Titanic data quality dataset for Huggingface
+Titanic data quality dataset for Huggingface.co
 
-Here's a **dataset card** for your Titanic data quality project, designed to highlight both the original errors and your corrections:
-
-```markdown
 # Dataset Card: Titanic Passenger List with Data Quality Annotations
 
 ## Dataset Description
+
 **Purpose**: Demonstrate how data quality impacts analytics through the iconic Titanic dataset, featuring:
 - **Original datasets** (with known age/class errors)
 - **Corrected versions** (with reconciled passenger details)
 - **Data quality annotations** (error flags, reconciliation sources)
 
-**Homepage**: [Your Project URL]  
-**Repository**: `your-username/titanic-data-quality`  
+**Homepage**: [Data Governance: Titanic Dataset and the Perils of Bad Data](https://www.databooth.com.au/posts/data-quality-titanic/)
+**Repository**: `mjboothaus-titanic-databooth`  
 **Tasks**: `data-cleaning`, `error-detection`, `survival-prediction`
 
 ## Dataset Versions
 | Version | Description | Key Features |
 |---------|-------------|--------------|
-| `original` | Unmodified Kaggle datasets | Contains age discrepancies (e.g., Algernon Barkworth recorded as 80) |
+| `original` | Unmodified datasets | Contains age discrepancies (e.g., Algernon Barkworth recorded as 80) |
 | `corrected-v1` | Age-reconciled data | Matches Encyclopedia Titanica records |
 | `annotated` | Error-flagged version | Contains `is_age_discrepancy` and `data_source` columns |
 
@@ -32,20 +30,22 @@ Here's a **dataset card** for your Titanic data quality project, designed to hig
 | `pclass` | int | Passenger class (1-3) | Class misassignments in original |
 | `survived` | int | Survival status | - |
 | `is_age_discrepancy` | bool | True if original age error >2 years | - |
-| `data_source` | string | Reconciliation source (ET/Kaggle) | - |
+| `data_source` | string | Reconciliation source (ET) | - |
 
 ## Usage Example
 ```
 from datasets import load_dataset
 
 # Compare original vs corrected data
-original = load_dataset("your-username/titanic-data-quality", name="original")
-corrected = load_dataset("your-username/titanic-data-quality", name="corrected-v1")
+original = load_dataset("mjboothaus/titanic-databooth", name="original")
+corrected = load_dataset("mjboothaus/titanic-databooth", name="corrected-v1")
 
 # Find corrected records
 discrepancies = corrected.filter(lambda x: x["is_age_discrepancy"])
 print(f"Fixed {len(discrepancies)} age errors")
 ```
+
+<!-- TODO: Also st.connnector class? And "plain" class too for DuckDB? -->
 
 ## Key Data Quality Issues
 1. **Age Discrepancies**  
@@ -81,24 +81,22 @@ print(f"Fixed {len(discrepancies)} age errors")
 - **ML Robustness Tests**: Train models on both versions
 
 ## License
-CC-BY-4.0 (include original Kaggle terms if required)
+CC-BY-4.0 [TODO: CHECK]
 
 ## Citation
 ```
-@dataset{titanic-data-quality,
-  author = {Your Name},
+@dataset{titanic-databooth,
+  author = {Michael J. Booth},
   title = {Titanic Data Quality Benchmark},
-  year = {2023},
+  year = {2025},
   publisher = {Hugging Face},
   version = {1.0.0}
 }
 ```
 
 ## Acknowledgements
-- **Kaggle** for original dataset
+
 - **Encyclopedia Titanica** for reference data
-- **M.J. Booth** (2017 analysis inspiration)
-```
 
 **Key Features to Highlight**:
 - **Version Control**: Clear lineage between original/corrected data
@@ -106,15 +104,15 @@ CC-BY-4.0 (include original Kaggle terms if required)
 - **Impact Metrics**: Quantifiable differences between datasets
 - **Educational Focus**: Designed for data governance training
 
-**Pro Tip**: Include a Jupyter notebook demonstrating:
+<!-- **TODO**: Include a Jupyter / Marimo / Streamlit notebook  -->
+
+**Code demonstrating**:
 1. Age distribution comparisons
 2. Survival rate analysis by data version
 3. Simple ML model performance differences
 
-Would you like me to provide specific code examples for the comparison notebook?
+## References:
 
-References:
-
-[1] https://www.databooth.com.au/posts/data-quality-titanic/
-[2] https://mjboothaus.wordpress.com/2017/07/11/did-a-male-octogenarian-really-survive-the-sinking-of-the-rms-titanic-2/
+- [1] https://www.databooth.com.au/posts/data-quality-titanic/
+- [2] https://mjboothaus.wordpress.com/2017/07/11/did-a-male-octogenarian-really-survive-the-sinking-of-the-rms-titanic-2/
 
