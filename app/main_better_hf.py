@@ -1,14 +1,15 @@
-import streamlit as st
+import io
+import os
+from typing import List, Optional, Union
+
 import duckdb
 import pandas as pd
-from streamlit.connections import BaseConnection
-from typing import Optional, List, Union
+import streamlit as st
 from huggingface_hub import HfApi
-import os
-import io
+from streamlit.connections import BaseConnection
 
 
-class HuggDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
+class HuggingDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
     """
     Streamlit-specific connection class that leverages DuckDB with schema/namespace support
     and persistence to a .duckdb file.
@@ -19,6 +20,7 @@ class HuggDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
         repo_id: str,
         db_path: Optional[str] = None,
         file_filters: Union[str, List[str]] = None,
+        force_recreate: bool = False,
         **kwargs,
     ) -> duckdb.DuckDBPyConnection:
         """
@@ -28,41 +30,54 @@ class HuggDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
             repo_id (str): Hugging Face repository ID (e.g., "mjboothaus/titanic-databooth").
             db_path (str, optional): Path to the .duckdb file for persistence. Defaults to None (in-memory).
             file_filters (Union[str, List[str]], optional): File extensions to filter by. Defaults to None.
+            force_recreate (bool, optional): Whether to force recreation of the database. Defaults to False.
             **kwargs: Additional arguments (e.g., secrets) are ignored but allowed for flexibility.
 
         Returns:
             duckdb.DuckDBPyConnection: A DuckDB connection instance.
         """
         try:
-            # Connect to DuckDB (either in-memory or persistent)
+            # Determine connection method
             if db_path:
+                db_exists = os.path.exists(db_path)
                 con = duckdb.connect(database=db_path, read_only=False)
-                st.info(f"Connected to DuckDB database file: {db_path}")
+                st.toast(f"Connected to DuckDB database file: {db_path}")
             else:
+                db_exists = False  # In memory databases do not exist
                 con = duckdb.connect(database=":memory:", read_only=False)
-                st.info("Connected to in-memory DuckDB database.")
+                st.toast("Connected to in-memory DuckDB database.")
 
             self.repo_id = repo_id  # Store repo_id as an instance variable
             self.schema_name = repo_id.replace("/", "_").replace(
                 "-", "_"
             )  # Create a valid schema name
-            con.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema_name};")
-            con.execute(
-                f"SET search_path = '{self.schema_name}';"
-            )  # Set schema as the default
 
-            # Create metadata table
-            con.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.schema_name}.metadata (
-                    file_name VARCHAR,
-                    file_size INTEGER,
-                    file_type VARCHAR,
-                    is_loaded BOOLEAN
-                );
-            """)
+            # Check if we should recreate the database
+            if force_recreate or not db_exists:
+                con.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema_name};")
+                con.execute(
+                    f"SET search_path = '{self.schema_name}';"
+                )  # Set schema as the default
 
-            # Load metadata and (optionally) data for all files in the repo
-            self._load_all_datasets(con, repo_id, file_filters)
+                # Create metadata table
+                con.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {self.schema_name}.metadata (
+                        file_name VARCHAR,
+                        file_size INTEGER,
+                        file_type VARCHAR,
+                        is_loaded BOOLEAN
+                    );
+                """)
+                # Load metadata and (optionally) data for all files in the repo
+                self._load_all_datasets(con, repo_id, file_filters)
+            else:
+                # Database exists, skip loading data
+                con.execute(
+                    f"SET search_path = '{self.schema_name}';"
+                )  # Set schema as the default
+                st.info(
+                    f"Using existing database.  Skipping data load from Hugging Face.  To force reload, set force_recreate=True"
+                )
 
             return con
         except Exception as e:
@@ -178,30 +193,54 @@ class HuggDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
             print(f"An error occurred: {e}")
             return []
 
+    def get_table_names(self, exclude_metadata: bool = True) -> List[str]:
+        """Retrieves the table names from the DuckDB connection, optionally excluding the metadata table.
+
+        Args:
+            exclude_metadata (bool, optional): Whether to exclude the metadata table from the results. Defaults to True.
+
+        Returns:
+            List[str]: A list of table names in the database.
+        """
+        try:
+            con = self._instance  # Access the DuckDB connection
+            # Get the table names from the current schema
+            table_names = con.execute("SHOW TABLES").fetchdf()["name"].tolist()
+            if exclude_metadata:
+                table_names = [name for name in table_names if name != "metadata"]
+            return table_names
+        except Exception as e:
+            st.error(f"Error retrieving table names: {e}")
+            return []
+
 
 # Example usage in a Streamlit app:
 if __name__ == "__main__":
-    repo_id = "mjboothaus/titanic-databooth"  # Define the repo_id
+    HF_REPO = "mjboothaus/titanic-databooth"  # Define the repo_id
     db_path = "titanic.duckdb"  # Specify the path to the .duckdb file
 
     conn = st.connection(
-        "my_duckdb_connection",
-        type=HuggDuckDBConnection,
-        repo_id=repo_id,
+        HF_REPO,
+        type=HuggingDuckDBConnection,
+        repo_id=HF_REPO,
         db_path=db_path,
         file_filters=["csv"],
+        force_recreate=False,
     )
 
-    # Example query (replace with your actual query)
-    try:
-        df = conn.query(f"SELECT * FROM {conn.schema_name}.train LIMIT 10")
-        st.dataframe(df)
-    except Exception as e:
-        st.error(f"Query error: {e}")
+    tab_data, tab_meta = st.tabs(["Data", "Metadata"])
 
-    # Display metadata
-    try:
-        metadata = conn.query(f"SELECT * FROM {conn.schema_name}.metadata")
-        st.write("Metadata:", metadata)
-    except Exception as e:
-        st.error(f"Error fetching metadata: {e}")
+    with tab_data:
+        data_table = st.selectbox(label="Select table", options=conn.get_table_names())
+        try:
+            df = conn.query(f"SELECT * FROM {conn.schema_name}.{data_table}")
+            st.dataframe(df)
+        except Exception as e:
+            st.error(f"Query error: {e}")
+
+    with tab_meta:
+        try:
+            metadata = conn.query(f"SELECT * FROM {conn.schema_name}.metadata")
+            st.write("Metadata:", metadata)
+        except Exception as e:
+            st.error(f"Error fetching metadata: {e}")
