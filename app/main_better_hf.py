@@ -66,6 +66,7 @@ class HuggingDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
                         file_name VARCHAR,
                         file_size INTEGER,
                         file_type VARCHAR,
+                        row_count INTEGER,
                         is_loaded BOOLEAN
                     );
                 """)
@@ -99,43 +100,52 @@ class HuggingDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
         for file in files:
             try:
                 file_path = f"hf://datasets/{repo_id}/{file}"
-                table_name = os.path.splitext(os.path.basename(file))[
-                    0
-                ]  # Derive table name from file name
+                table_name = os.path.splitext(os.path.basename(file))[0]
 
                 # Load data into a Pandas DataFrame
                 df = con.execute(f"SELECT * FROM '{file_path}'").fetchdf()
 
                 # Serialize to CSV using StringIO
-                csv_buffer = io.StringIO()
-                df.to_csv(csv_buffer, index=False)
-                csv_string = csv_buffer.getvalue()
+                csv_buffer = io.StringIO()  # Commented out: Not needed for row count
+                df.to_csv(
+                    csv_buffer, index=False
+                )  # Commented out: Not needed for row count
+                csv_string = (
+                    csv_buffer.getvalue()
+                )  # Commented out: Not needed for row count
 
                 # Get file size
-                file_size = len(csv_string.encode("utf-8"))  # Get size in bytes
-
-                # Get file type
-                file_type = file.split(".")[-1].lower()
+                file_size = len(
+                    csv_string.encode("utf-8")
+                )  # Get size in bytes # Commented out: Not needed for row count
 
                 # Create table for the data, and load the data set
                 con.execute(
                     f"CREATE TABLE IF NOT EXISTS {self.schema_name}.{table_name} AS SELECT * FROM '{file_path}'"
                 )
 
+                # Get row count using SQL query
+                row_count = con.execute(
+                    f"SELECT count(*) FROM {self.schema_name}.{table_name}"
+                ).fetchone()[0]
+
+                # Get file type
+                file_type = file.split(".")[-1].lower()
+
                 # Add metadata
                 con.execute(f"""
-                    INSERT INTO {self.schema_name}.metadata (file_name, file_size, file_type, is_loaded)
-                    VALUES ('{file}', {file_size}, '{file_type}', TRUE);
+                    INSERT INTO {self.schema_name}.metadata (file_name, file_size, file_type, row_count, is_loaded)
+                    VALUES ('{file}', {file_size}, '{file_type}', {row_count}, TRUE);
                 """)
-                st.success(
+                logger.info(
                     f"Loaded dataset into table: {self.schema_name}.{table_name}"
                 )
 
             except Exception as e:
                 st.error(f"Error loading dataset {file}: {e}")
                 con.execute(f"""
-                    INSERT INTO {self.schema_name}.metadata (file_name, file_size, file_type, is_loaded)
-                    VALUES ('{file}', 0, 'unknown', FALSE);
+                    INSERT INTO {self.schema_name}.metadata (file_name, file_size, file_type, row_count, is_loaded)
+                    VALUES ('{file}', 0, 'unknown', 0, FALSE);
                 """)
 
     def query(self, sql: str, ttl: int = 3600, **kwargs) -> pd.DataFrame:
