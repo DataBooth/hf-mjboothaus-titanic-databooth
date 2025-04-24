@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import Any, Dict, List
 
 import duckdb
@@ -28,26 +29,33 @@ class HuggDuckDBConnection:
         """Configure Loguru logging level."""
         logger.remove()  # Remove default handler
         level = "DEBUG" if self.verbose else "INFO"
+        # Directly output to console/terminal; Streamlit will capture it
         logger.add(
-            lambda msg: st.code(msg) if self._is_streamlit() else None,
+            sys.stderr,
             level=level,
             format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
         )
-
-    def _is_streamlit(self) -> bool:
-        """Check if running in Streamlit context."""
-        try:
-            from streamlit.runtime.scriptrunner import get_script_run_ctx
-
-            return get_script_run_ctx() is not None
-        except ImportError:
-            return False
 
     def _load_datasets(self) -> None:
         """Load CSV files from HF repo into DuckDB tables with validation."""
         try:
             logger.info(f"Loading dataset: {self.repo_id}")
             dataset = load_dataset(self.repo_id)
+
+            # Check if it's a DatasetDict (multiple splits) or a single Dataset
+            if isinstance(dataset, dict):  # It's a DatasetDict
+                if "train" in dataset:
+                    dataset = dataset["train"]  # Select the 'train' split
+                else:
+                    # Handle cases where there's no 'train' split
+                    split_names = ", ".join(dataset.keys())
+                    logger.warning(
+                        f"No 'train' split found. Available splits: {split_names}"
+                    )
+                    # You might choose a default split or raise an error here
+                    dataset = next(
+                        iter(dataset.values())
+                    )  # use the first available dataset
 
             if not dataset.info.download_checksums:
                 raise ValueError("No downloadable files found")
@@ -62,31 +70,40 @@ class HuggDuckDBConnection:
                 table_name = os.path.splitext(file.split("/")[-1])[0]
                 logger.debug(f"Processing file: {file} as table '{table_name}'")
 
-                df = load_dataset(self.repo_id, data_files=file)["train"].to_pandas()
-                self.con.register(table_name, df)
-                logger.success(f"Created table: {table_name} ({len(df)} rows)")
+                try:
+                    df = load_dataset(self.repo_id, data_files=file)[
+                        "train"
+                    ].to_pandas()
+                    self.con.register(table_name, df)
+                    logger.success(f"Created table: {table_name} ({len(df)} rows)")
+                except Exception as e:
+                    logger.error(f"Failed to load CSV file {file}: {str(e)}")
+                    raise ValueError(f"Failed to load CSV file {file}: {str(e)}") from e
 
         except Exception as e:
-            logger.error(f"Failed to load {self.repo_id}: {str(e)}")
-            raise
+            if "EmptyDatasetError" in str(e) or "doesn't contain any data files" in str(
+                e
+            ):
+                logger.error(f"No data files found in {self.repo_id}")
+                raise ValueError(
+                    f"No data files found in {self.repo_id}. Ensure the repository contains data files."
+                ) from e
+            elif "RepoNotFoundError" in str(e):
+                logger.error(f"Repository {self.repo_id} not found.")
+                raise ValueError(
+                    f"Repository {self.repo_id} not found. Check the repository name and ensure it exists."
+                ) from e
+            else:
+                logger.error(f"Failed to load dataset {self.repo_id}: {str(e)}")
+                raise
 
-    def query(self, sql: str) -> pd.DataFrame:
-        """Execute SQL query against loaded datasets.
-
-        Args:
-            sql: SQL query string
-
-        Returns:
-            Query results as pandas DataFrame
-
-        Raises:
-            duckdb.Error: On invalid SQL syntax
-        """
+    def sql(self, query: str) -> pd.DataFrame:
+        """Execute a SQL query and return the result as a Pandas DataFrame."""
         try:
-            logger.debug(f"Executing query: {sql}")
-            return self.con.execute(sql).fetchdf()
+            logger.debug(f"Executing SQL: {query}")
+            return self.con.execute(query).fetchdf()
         except duckdb.Error as e:
-            logger.error(f"Query failed: {sql}\nError: {str(e)}")
+            logger.error(f"SQL execution failed: {query}\nError: {str(e)}")
             raise
 
     def get_schema(self, table_name: str) -> Dict[str, str]:

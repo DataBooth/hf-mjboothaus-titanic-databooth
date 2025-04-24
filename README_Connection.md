@@ -4,7 +4,7 @@
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-≥1.22.0-FF4B4B.svg)](https://streamlit.io)
 
-A production-ready connector for analyzing Hugging Face datasets with DuckDB in Streamlit apps or standalone scripts.
+A production-ready connector for analysing Hugging Face datasets with DuckDB in Streamlit apps or standalone scripts.
 
 ## Features
 
@@ -18,7 +18,7 @@ A production-ready connector for analyzing Hugging Face datasets with DuckDB in 
 
 ```
 
-uv add hf-duckdb-connector  \# (Note: Package name placeholder)
+uv add huggingduck
 
 ```
 
@@ -27,7 +27,7 @@ uv add hf-duckdb-connector  \# (Note: Package name placeholder)
 ### 1. Standalone Usage
 ```
 
-from hf_duckdb import HuggDuckDBConnection
+from huggingduck import HuggDuckDBConnection
 
 conn = HuggDuckDBConnection("your-username/titanic-data-quality")
 df = conn.query("""
@@ -46,7 +46,7 @@ WHERE ABS(o.age - c.age) > 2
 # .streamlit/secrets.toml
 
 [connections.titanic]
-repo_id = "your-username/titanic-data-quality"
+repo_id = "mjboothaus/titanic-databooth"
 verbose = true
 
 ```
@@ -55,7 +55,7 @@ verbose = true
 
 import streamlit as st
 
-conn = st.connection("titanic", type="hf_duckdb.HuggDuckDBStreamlitConnection")
+conn = st.connection("titanic", type="huggingduck.HuggDuckDBStreamlitConnection")
 st.dataframe(conn.preview("corrected_v1"))
 
 ```

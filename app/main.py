@@ -1,34 +1,50 @@
 import streamlit as st
 from huggingduck import HuggDuckDBStreamlitConnection
 
+HF_REPO = "mjboothaus/titanic-databooth"
+
+st.set_page_config(layout="wide")
+
 # Initialise connection
-conn = st.connection("titanic", type=HuggDuckDBStreamlitConnection)
+conn = st.connection(
+    "titanic",
+    type=HuggDuckDBStreamlitConnection,
+    repo_id=HF_REPO,
+)
 
-# App layout
+table_names = ", ".join(conn._instance.tables)
+
 st.title("Titanic Data Quality Explorer")
-st.subheader(f"Available Tables: {', '.join(conn.tables)}")
+st.subheader(f"Huggingface.co `{HF_REPO}`")
 
-# Dataset selector
-table = st.selectbox("Choose dataset version", conn.tables)
+tab1, tab2 = st.tabs(["Data", "Schema"])
 
-# Data preview
-st.dataframe(conn.preview(table))
+with tab1:
+    st.markdown(f"Available Tables: {table_names}")
 
-# Analysis section
-st.header("Age Discrepancy Analysis")
-discrepancies = conn.query(f"""
-    SELECT 
-        original.passenger_id,
-        original.age AS reported_age,
-        {table}.age AS corrected_age,
-        ABS(original.age - {table}.age) AS difference
-    FROM original
-    JOIN {table} ON original.passenger_id = {table}.passenger_id
-    WHERE ABS(original.age - {table}.age) > 2
-    ORDER BY difference DESC
-""")
-st.dataframe(discrepancies)
+    table_select = st.selectbox("Choose dataset version", table_names)
 
-# Schema inspection
-if st.checkbox("Show Schema"):
-    st.json(conn.get_schema(table))
+    if table_select:
+        st.dataframe(conn.preview(table_select))
+
+    # Analysis section
+    if "original" in table_names:
+        st.header("Age Discrepancy Analysis")
+        discrepancies = conn.query(f"""
+            SELECT 
+                original.passenger_id,
+                original.age AS reported_age,
+                {table_select}.age AS corrected_age,
+                ABS(original.age - {table_select}.age) AS difference
+            FROM original
+            JOIN {table_select} ON original.passenger_id = {table_select}.passenger_id
+            WHERE ABS(original.age - {table_select}.age) > 2
+            ORDER BY difference DESC
+        """)
+        st.dataframe(discrepancies)
+
+with tab2:
+    st.header("Table schema")
+    # Schema inspection
+    if st.checkbox("Show Schema"):
+        st.json(conn._instance.get_schema(table_select))
