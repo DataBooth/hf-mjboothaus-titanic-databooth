@@ -6,6 +6,7 @@ import duckdb
 import pandas as pd
 import streamlit as st
 from huggingface_hub import HfApi
+from loguru import logger
 from streamlit.connections import BaseConnection
 
 
@@ -41,11 +42,11 @@ class HuggingDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
             if db_path:
                 db_exists = os.path.exists(db_path)
                 con = duckdb.connect(database=db_path, read_only=False)
-                st.toast(f"Connected to DuckDB database file: {db_path}")
+                logger.info(f"Connected to DuckDB database file: {db_path}")
             else:
                 db_exists = False  # In memory databases do not exist
                 con = duckdb.connect(database=":memory:", read_only=False)
-                st.toast("Connected to in-memory DuckDB database.")
+                logger.info("Connected to in-memory DuckDB database.")
 
             self.repo_id = repo_id  # Store repo_id as an instance variable
             self.schema_name = repo_id.replace("/", "_").replace(
@@ -75,7 +76,7 @@ class HuggingDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
                 con.execute(
                     f"SET search_path = '{self.schema_name}';"
                 )  # Set schema as the default
-                st.info(
+                logger.info(
                     f"Using existing database.  Skipping data load from Hugging Face.  To force reload, set force_recreate=True"
                 )
 
@@ -147,7 +148,7 @@ class HuggingDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
             try:
                 con = self._instance  # Access the DuckDB connection
                 df = con.execute(sql).fetchdf()
-                st.info(f"Successfully executed query:\n{sql}")
+                logger.info(f"Successfully executed query:\n{sql}")
                 return df
             except Exception as e:
                 st.error(f"Query execution error: {e}")
@@ -218,6 +219,11 @@ class HuggingDuckDBConnection(BaseConnection[duckdb.DuckDBPyConnection]):
 if __name__ == "__main__":
     HF_REPO = "mjboothaus/titanic-databooth"  # Define the repo_id
     db_path = "titanic.duckdb"  # Specify the path to the .duckdb file
+
+    st.set_page_config(layout="wide")
+
+    st.title("Huggingface.co repo viewer")
+    st.subheader(f"`{HF_REPO}`")
 
     conn = st.connection(
         HF_REPO,
