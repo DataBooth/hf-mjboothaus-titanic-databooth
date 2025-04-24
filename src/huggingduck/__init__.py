@@ -1,3 +1,3 @@
-from .connection import HuggDuckDBConnection, HuggDuckDBStreamlitConnection
+from .connection import HuggingDuckDBConnection, HuggingDuckDBStConnection
 
-__all__ = ["HuggDuckDBConnection", "HuggDuckDBStreamlitConnection"]
+__all__ = ["HuggingDuckDBConnection", "HuggingDuckDBStConnection"]

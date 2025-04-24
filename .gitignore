@@ -1,6 +1,7 @@
 # Extras
 
 *.duckdb
+*.wal
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

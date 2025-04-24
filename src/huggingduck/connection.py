@@ -1,254 +1,320 @@
 import os
-import sys
-from typing import Any, Dict, List
+from typing import List, Optional, Union
 
 import duckdb
 import pandas as pd
 import streamlit as st
-from datasets import get_dataset_infos, load_dataset
+from huggingface_hub import HfApi
 from loguru import logger
 from streamlit.connections import BaseConnection
 
 
-class HuggDuckDBConnection:
-    """Core connection class for Hugging Face datasets in DuckDB.
-
-    Args:
-        repo_id: Hugging Face dataset identifier (format: username/dataset)
-        verbose: Enable debug logging if True
+class HuggingDuckDBConnection:
+    """
+    Core class for interacting with Hugging Face datasets in DuckDB, without Streamlit dependencies.
     """
 
-    def __init__(self, repo_id: str, verbose: bool = False):
-        self.repo_id = repo_id
-        self.verbose = verbose
-        self.con = duckdb.connect(":memory:")
-        self._setup_logging()
-        # self._load_datasets()
-
-    def _setup_logging(self) -> None:
-        """Configure Loguru logging level."""
-        logger.remove()  # Remove default handler
-        level = "DEBUG" if self.verbose else "INFO"
-        # Directly output to console/terminal; Streamlit will capture it
-        logger.add(
-            sys.stderr,
-            level=level,
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-        )
-
-    def _load_datasets(self) -> None:
-        """Load CSV files from HF repo into DuckDB tables with validation."""
-        try:
-            logger.info(f"Loading dataset: {self.repo_id}")
-
-            try:
-                dataset = load_dataset(self.repo_id)
-            except Exception as e:
-                logger.error(f"Failed to load dataset: {self.repo_id}. Error: {e}")
-                raise
-
-            csv_files = []
-            try:
-                # Check if the dataset has the 'info' attribute and 'download_checksums'
-                if hasattr(dataset, "info") and hasattr(
-                    dataset.info, "download_checksums"
-                ):
-                    files = dataset.info.download_checksums.keys()
-                    csv_files = [f for f in files if f.endswith(".csv")]
-                else:
-                    # If not, assume the dataset is a DatasetDict and its keys are the data files
-                    csv_files = [f for f in dataset.keys() if f.endswith(".csv")]
-            except Exception as e:
-                logger.error(f"Failed to retrieve file list from dataset. Error: {e}")
-                raise ValueError("Could not determine CSV files in the dataset") from e
-
-            if not csv_files:
-                raise ValueError("No CSV files found in repository")
-
-            for file in csv_files:
-                table_name = os.path.splitext(file.split("/")[-1])[0]
-                logger.debug(f"Processing file: {file} as table '{table_name}'")
-
-                try:
-                    df = load_dataset(self.repo_id, data_files=file).to_pandas()
-                    self.con.register(table_name, df)
-                    logger.success(f"Created table: {table_name} ({len(df)} rows)")
-                except Exception as e:
-                    logger.error(f"Failed to load CSV file {file}: {str(e)}")
-                    raise ValueError(f"Failed to load CSV file {file}: {str(e)}") from e
-
-        except Exception as e:
-            logger.error(f"Failed to load {self.repo_id}: {str(e)}")
-            raise
-
-    def view_dataset(self) -> Dict[str, Any]:
-        """Provides a human-friendly view of the dataset, including metadata."""
-        try:
-            logger.info(f"Fetching dataset information for: {self.repo_id}")
-
-            # Load dataset information
-            try:
-                dataset_info = get_dataset_infos(self.repo_id)
-                # Convert DatasetInfo to a serializable dictionary
-                dataset_info_serializable = {}
-                for key, value in dataset_info.items():
-                    dataset_info_serializable[key] = str(value)
-
-            except Exception as e:
-                logger.error(f"Failed to load dataset info: {e}")
-                dataset_info_serializable = {"error": str(e)}
-
-            # Load a sample of the data to get a sense of the structure
-            try:
-                dataset = load_dataset(
-                    self.repo_id, split="train", streaming=True, num_rows=3
-                )
-                sample_data = list(dataset.take(3))  # Get the first 3 rows
-            except Exception as e:
-                logger.warning(f"Failed to load dataset sample: {e}")
-                sample_data = "Could not load data sample"
-
-            # Prepare the view
-            view = {
-                "dataset_id": self.repo_id,
-                "dataset_info": dataset_info_serializable,
-                "sample_data": str(sample_data),
-                "tables": self.tables,  # Add list of tables in the DuckDB connection
-            }
-
-            return view
-
-        except Exception as e:
-            logger.error(f"Failed to view dataset {self.repo_id}: {e}")
-            return {"error": str(e)}
-
-    def query(self, sql: str) -> pd.DataFrame:
-        """Execute SQL query against loaded datasets.
+    def __init__(
+        self,
+        repo_id: str,
+        db_path: Optional[str] = None,
+        file_filters: Union[str, List[str]] = None,
+        force_recreate: bool = False,
+    ):
+        """
+        Initializes the HuggingDuckDBConnection connection.
 
         Args:
-            sql: SQL query string
+            repo_id (str): Hugging Face repository ID (e.g., "mjboothaus/titanic-databooth").
+            db_path (str, optional): Path to the .duckdb file for persistence. Defaults to None (in-memory).
+            file_filters (Union[str, List[str]], optional): File extensions to filter by. Defaults to None.
+            force_recreate (bool, optional): Whether to force recreation of the database. Defaults to False.
+        """
+        self.repo_id = repo_id
+        self.db_path = db_path
+        self.file_filters = file_filters
+        self.force_recreate = force_recreate
+        self.con = self._connect()  # Establish connection immediately
+
+    def _connect(self) -> duckdb.DuckDBPyConnection:
+        """
+        Establishes a DuckDB connection and sets up the schema, with optional persistence.
 
         Returns:
-            Query results as pandas DataFrame
+            duckdb.DuckDBPyConnection: A DuckDB connection instance.
+        """
+        try:
+            # Determine connection method
+            if self.db_path:
+                db_exists = os.path.exists(self.db_path)
+                con = duckdb.connect(database=self.db_path, read_only=False)
+                logger.info(f"Connected to DuckDB database file: {self.db_path}")
+            else:
+                db_exists = False  # In memory databases do not exist
+                con = duckdb.connect(database=":memory:", read_only=False)
+                logger.info("Connected to in-memory DuckDB database.")
 
-        Raises:
-            duckdb.Error: On invalid SQL syntax
+            self.schema_name = self.repo_id.replace("/", "_").replace(
+                "-", "_"
+            )  # Create a valid schema name
+
+            # Check if we should recreate the database
+            if self.force_recreate or not db_exists:
+                con.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema_name};")
+                con.execute(
+                    f"SET search_path = '{self.schema_name}';"
+                )  # Set schema as the default
+
+                # Create metadata table
+                con.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {self.schema_name}.metadata (
+                        file_name VARCHAR,
+                        file_size INTEGER,
+                        file_type VARCHAR,
+                        row_count INTEGER,
+                        is_loaded BOOLEAN
+                    );
+                """)
+                # Load metadata and (optionally) data for all files in the repo
+                self._load_all_datasets(con)
+            else:
+                # Database exists, skip loading data
+                con.execute(
+                    f"SET search_path = '{self.schema_name}';"
+                )  # Set schema as the default
+                logger.info(
+                    f"Using existing database.  Skipping data load from Hugging Face. To force reload, set force_recreate=True"
+                )
+
+            return con
+        except Exception as e:
+            logger.error(f"Connection error: {e}")
+            raise
+
+    def _load_all_datasets(self, con: duckdb.DuckDBPyConnection):
+        """Loads metadata and (optionally) data for all qualifying files in the Hugging Face repo."""
+        files = self.list_files_in_huggingface_repo(
+            self.repo_id, self.file_filters
+        )  # Get filtered list of files
+
+        for file in files:
+            try:
+                file_path = f"hf://datasets/{self.repo_id}/{file}"
+                table_name = os.path.splitext(os.path.basename(file))[
+                    0
+                ]  # Derive table name from file name
+
+                # Create table for the data, and load the data set
+                con.execute(
+                    f"CREATE TABLE IF NOT EXISTS {self.schema_name}.{table_name} AS SELECT * FROM '{file_path}'"
+                )
+
+                # Get row count using SQL query
+                row_count = con.execute(
+                    f"SELECT count(*) FROM {self.schema_name}.{table_name}"
+                ).fetchone()[0]
+
+                # Get file size  The is is tricky and can be solved as an enhancement
+                file_size = 0
+
+                # Get file type
+                file_type = file.split(".")[-1].lower()
+
+                # Add metadata
+                con.execute(f"""
+                    INSERT INTO {self.schema_name}.metadata (file_name, file_size, file_type, row_count, is_loaded)
+                    VALUES ('{file}', {file_size}, '{file_type}', {row_count}, TRUE);
+                """)
+                logger.info(
+                    f"Loaded dataset into table: {self.schema_name}.{table_name}"
+                )
+
+            except Exception as e:
+                logger.error(f"Error loading dataset {file}: {e}")
+                con.execute(f"""
+                    INSERT INTO {self.schema_name}.metadata (file_name, file_size, file_type, row_count, is_loaded)
+                    VALUES ('{file}', 0, 'unknown', 0, FALSE);
+                """)
+
+    def query(self, sql: str) -> pd.DataFrame:
+        """
+        Executes a SQL query against the DuckDB connection.
         """
         try:
             logger.debug(f"Executing query: {sql}")
-            return self.con.execute(sql).fetchdf()
-        except duckdb.Error as e:
-            logger.error(f"Query failed: {sql}\nError: {str(e)}")
+            df = self.con.execute(sql).fetchdf()
+            logger.info(f"Successfully executed query:\n{sql}")
+            return df
+        except Exception as e:
+            logger.error(f"Query execution error: {e}")
             raise
 
-    def sql(self, query: str) -> pd.DataFrame:
-        """Execute a SQL query and return the result as a Pandas DataFrame."""
+    def sql_df(self, sql: str) -> pd.DataFrame:
+        """
+        Executes a SQL query and returns the result as a Pandas DataFrame.
+        """
         try:
-            logger.debug(f"Executing SQL: {query}")
-            return self.con.execute(query).fetchdf()
-        except duckdb.Error as e:
-            logger.error(f"SQL execution failed: {query}\nError: {str(e)}")
+            logger.debug(f"Executing query: {sql}")
+            df = self.con.sql(sql).df()
+            logger.info(f"Successfully executed query:\n{sql}")
+            return df
+        except Exception as e:
+            logger.error(f"Query execution error: {e}")
             raise
 
-    def get_schema(self, table_name: str) -> Dict[str, str]:
-        """Retrieve column types for a table.
+    def list_files_in_huggingface_repo(
+        self, repo_id: str, file_filters: Union[str, List[str]] = None
+    ) -> List[str]:
+        """Lists the files in a Hugging Face dataset repository using the Hugging Face Hub API,
+        applying optional file filters.
 
         Args:
-            table_name: Name of table to inspect
+            repo_id (str): The Hugging Face repository ID (e.g., "mjboothaus/titanic-databooth").
+            file_filters (str, List[str], optional): A string or a list of strings representing file extensions to filter by
+                (e.g., "csv" or ["csv", "parquet"]). Defaults to None (no filter).
 
         Returns:
-            Dictionary of {column_name: data_type}
-
-        Raises:
-            ValueError: If table doesn't exist
+            List[str]: A list of file names in the repository that match the specified filters.
         """
-        if table_name not in self.tables:
-            raise ValueError(
-                f"Table {table_name} not found. Available tables: {self.tables}"
-            )
+        try:
+            api = HfApi()
+            repo_files = api.list_repo_files(repo_id, repo_type="dataset")
 
-        return (
-            self.con.execute(f"DESCRIBE {table_name}")
-            .fetchdf()
-            .set_index("column_name")["column_type"]
-            .to_dict()
+            if file_filters:
+                if isinstance(file_filters, str):
+                    file_filters = [
+                        file_filters
+                    ]  # Convert to a list if it's a single string
+
+                filtered_files = []
+                for file in repo_files:
+                    for file_filter in file_filters:
+                        if file.endswith(f".{file_filter}"):
+                            filtered_files.append(file)
+                            break  # Once a match is found, move to the next file
+                return filtered_files
+            else:
+                return repo_files  # No filter, return all files
+
+        except Exception as e:
+            logger.error(f"An error occurred: {e}")
+            return []
+
+    def get_table_names(self, exclude_metadata: bool = True) -> List[str]:
+        """Retrieves the table names from the DuckDB connection, optionally excluding the metadata table.
+
+        Args:
+            exclude_metadata (bool, optional): Whether to exclude the metadata table from the results. Defaults to True.
+
+        Returns:
+            List[str]: A list of table names in the database.
+        """
+        try:
+            table_names = self.con.execute("SHOW TABLES").fetchdf()["name"].tolist()
+            if exclude_metadata:
+                table_names = [name for name in table_names if name != "metadata"]
+            return table_names
+        except Exception as e:
+            logger.error(f"Error retrieving table names: {e}")
+            return []
+
+    def close(self):
+        """Closes the DuckDB connection."""
+        if self.con:
+            self.con.close()
+            logger.info("DuckDB connection closed.")
+
+
+class HuggingDuckDBStConnection(BaseConnection[HuggingDuckDBConnection]):
+    """
+    Streamlit-specific connection class that leverages HuggingDuckDBConnection for interacting with Hugging Face datasets.
+    """
+
+    def _connect(self, **kwargs) -> HuggingDuckDBConnection:
+        """
+        Establishes the connection using parameters from secrets or kwargs.
+
+        Args:
+            **kwargs: Parameters for HuggingDuckDBConnection (repo_id, db_path, file_filters, force_recreate).
+        """
+        repo_id = kwargs.get("repo_id", st.secrets.get("repo_id"))
+        db_path = kwargs.get("db_path", st.secrets.get("db_path"))
+        file_filters = kwargs.get("file_filters", st.secrets.get("file_filters"))
+        force_recreate = kwargs.get(
+            "force_recreate", st.secrets.get("force_recreate", False)
         )
 
-    @property
-    def tables(self) -> List[str]:
-        """List of available tables in the database."""
-        return self.con.execute("SHOW TABLES").fetchdf()["name"].tolist()
-
-    def health_check(self) -> Dict[str, Any]:
-        """Verify database integrity.
-
-        Returns:
-            Dictionary with health status and table counts
-        """
-        status = {"healthy": False, "tables": {}, "error": None}
+        if not repo_id:
+            st.error("repo_id is required (provide via kwargs or secrets.toml)")
+            raise ValueError("repo_id is required")
 
         try:
-            for table in self.tables:
-                count = self.con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                status["tables"][table] = count
-            status["healthy"] = True
+            hdb = HuggingDuckDBConnection(
+                repo_id=repo_id,
+                db_path=db_path,
+                file_filters=file_filters,
+                force_recreate=force_recreate,
+            )
+            st.info(f"Connected to HuggingFace repo: {repo_id}")
+            return hdb
         except Exception as e:
-            status["error"] = str(e)
-
-        return status
-
-
-class HuggDuckDBStreamlitConnection(BaseConnection[HuggDuckDBConnection]):
-    """Streamlit-specific connection with caching and secrets integration."""
-
-    def _connect(self, **kwargs) -> HuggDuckDBConnection:
-        """Establish connection with options from secrets or kwargs.
-
-        Args:
-            **kwargs: Override secrets with explicit parameters
-
-        Returns:
-            Configured HuggDuckDBConnection instance
-        """
-        repo_id = kwargs.get("repo_id", self._secrets.get("repo_id"))
-        verbose = kwargs.get("verbose", self._secrets.get("verbose", False))
-
-        if not repo_id:
-            raise ValueError("repo_id required (provide via kwargs or secrets.toml)")
-
-        return HuggDuckDBConnection(repo_id=repo_id, verbose=verbose)
+            st.error(f"Connection failed: {e}")
+            raise
 
     def query(self, sql: str, ttl: int = 3600) -> pd.DataFrame:
-        """Cached query execution with automatic retries.
-
-        Args:
-            sql: SQL query string
-            ttl: Cache duration in seconds
-
-        Returns:
-            Query results as pandas DataFrame
+        """
+        Executes a SQL query against the HuggingDuckDBConnection connection, with caching.
         """
 
-        @logger.catch
         @st.cache_data(ttl=ttl)
         def _query(sql: str) -> pd.DataFrame:
-            return self._instance.query(sql)
+            try:
+                df = self._instance.query(sql)
+                st.info(f"Successfully executed query:\n{sql}")
+                return df
+            except Exception as e:
+                st.error(f"Query execution error: {e}")
+                raise
 
         return _query(sql)
 
-    def preview(self, table_name: str, limit: int = 5) -> pd.DataFrame:
-        """Quick table preview with validation.
+    def list_files_in_huggingface_repo(
+        self, repo_id: str, file_filters: Union[str, List[str]] = None
+    ) -> List[str]:
+        """Lists the files in a Hugging Face dataset repository using the Hugging Face Hub API,
+        applying optional file filters.
 
         Args:
-            table_name: Name of table to preview
-            limit: Number of rows to return
+            repo_id (str): The Hugging Face repository ID (e.g., "mjboothaus/titanic-databooth").
+            file_filters (str, List[str], optional): A string or a list of strings representing file extensions to filter by
+                (e.g., "csv" or ["csv", "parquet"]). Defaults to None (no filter).
 
         Returns:
-            First N rows of the table
+            List[str]: A list of file names in the repository that match the specified filters.
         """
-        if table_name not in self._instance.tables:
-            raise ValueError(
-                f"Invalid table. Available tables: {self._instance.tables}"
-            )
+        try:
+            files = self._instance.list_files_in_huggingface_repo(repo_id, file_filters)
+            return files
+        except Exception as e:
+            st.error(f"Error retrieving table names: {e}")
+            return []
 
-        return self.query(f"SELECT * FROM {table_name} LIMIT {limit}")
+    def get_table_names(self, exclude_metadata: bool = True) -> List[str]:
+        """Retrieves the table names from the DuckDB connection, optionally excluding the metadata table.
+
+        Args:
+            exclude_metadata (bool, optional): Whether to exclude the metadata table from the results. Defaults to True.
+
+        Returns:
+            List[str]: A list of table names in the database.
+        """
+        try:
+            table_names = self._instance.get_table_names(exclude_metadata)
+            return table_names
+        except Exception as e:
+            st.error(f"Error retrieving table names: {e}")
+            return []
+
+    def close(self):
+        """Closes the DuckDB connection."""
+        self._instance.close()  # Call the close method of the HuggingDuckDBConnection instance
