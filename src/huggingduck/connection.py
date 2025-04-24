@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 import duckdb
 import pandas as pd
 import streamlit as st
-from datasets import load_dataset
+from datasets import get_dataset_infos, load_dataset
 from loguru import logger
 from streamlit.connections import BaseConnection
 
@@ -23,7 +23,7 @@ class HuggDuckDBConnection:
         self.verbose = verbose
         self.con = duckdb.connect(":memory:")
         self._setup_logging()
-        self._load_datasets()
+        # self._load_datasets()
 
     def _setup_logging(self) -> None:
         """Configure Loguru logging level."""
@@ -40,28 +40,27 @@ class HuggDuckDBConnection:
         """Load CSV files from HF repo into DuckDB tables with validation."""
         try:
             logger.info(f"Loading dataset: {self.repo_id}")
-            dataset = load_dataset(self.repo_id)
 
-            # Check if it's a DatasetDict (multiple splits) or a single Dataset
-            if isinstance(dataset, dict):  # It's a DatasetDict
-                if "train" in dataset:
-                    dataset = dataset["train"]  # Select the 'train' split
+            try:
+                dataset = load_dataset(self.repo_id)
+            except Exception as e:
+                logger.error(f"Failed to load dataset: {self.repo_id}. Error: {e}")
+                raise
+
+            csv_files = []
+            try:
+                # Check if the dataset has the 'info' attribute and 'download_checksums'
+                if hasattr(dataset, "info") and hasattr(
+                    dataset.info, "download_checksums"
+                ):
+                    files = dataset.info.download_checksums.keys()
+                    csv_files = [f for f in files if f.endswith(".csv")]
                 else:
-                    # Handle cases where there's no 'train' split
-                    split_names = ", ".join(dataset.keys())
-                    logger.warning(
-                        f"No 'train' split found. Available splits: {split_names}"
-                    )
-                    # You might choose a default split or raise an error here
-                    dataset = next(
-                        iter(dataset.values())
-                    )  # use the first available dataset
-
-            if not dataset.info.download_checksums:
-                raise ValueError("No downloadable files found")
-
-            files = dataset.info.download_checksums.keys()
-            csv_files = [f for f in files if f.endswith(".csv")]
+                    # If not, assume the dataset is a DatasetDict and its keys are the data files
+                    csv_files = [f for f in dataset.keys() if f.endswith(".csv")]
+            except Exception as e:
+                logger.error(f"Failed to retrieve file list from dataset. Error: {e}")
+                raise ValueError("Could not determine CSV files in the dataset") from e
 
             if not csv_files:
                 raise ValueError("No CSV files found in repository")
@@ -71,9 +70,7 @@ class HuggDuckDBConnection:
                 logger.debug(f"Processing file: {file} as table '{table_name}'")
 
                 try:
-                    df = load_dataset(self.repo_id, data_files=file)[
-                        "train"
-                    ].to_pandas()
+                    df = load_dataset(self.repo_id, data_files=file).to_pandas()
                     self.con.register(table_name, df)
                     logger.success(f"Created table: {table_name} ({len(df)} rows)")
                 except Exception as e:
@@ -81,21 +78,68 @@ class HuggDuckDBConnection:
                     raise ValueError(f"Failed to load CSV file {file}: {str(e)}") from e
 
         except Exception as e:
-            if "EmptyDatasetError" in str(e) or "doesn't contain any data files" in str(
-                e
-            ):
-                logger.error(f"No data files found in {self.repo_id}")
-                raise ValueError(
-                    f"No data files found in {self.repo_id}. Ensure the repository contains data files."
-                ) from e
-            elif "RepoNotFoundError" in str(e):
-                logger.error(f"Repository {self.repo_id} not found.")
-                raise ValueError(
-                    f"Repository {self.repo_id} not found. Check the repository name and ensure it exists."
-                ) from e
-            else:
-                logger.error(f"Failed to load dataset {self.repo_id}: {str(e)}")
-                raise
+            logger.error(f"Failed to load {self.repo_id}: {str(e)}")
+            raise
+
+    def view_dataset(self) -> Dict[str, Any]:
+        """Provides a human-friendly view of the dataset, including metadata."""
+        try:
+            logger.info(f"Fetching dataset information for: {self.repo_id}")
+
+            # Load dataset information
+            try:
+                dataset_info = get_dataset_infos(self.repo_id)
+                # Convert DatasetInfo to a serializable dictionary
+                dataset_info_serializable = {}
+                for key, value in dataset_info.items():
+                    dataset_info_serializable[key] = str(value)
+
+            except Exception as e:
+                logger.error(f"Failed to load dataset info: {e}")
+                dataset_info_serializable = {"error": str(e)}
+
+            # Load a sample of the data to get a sense of the structure
+            try:
+                dataset = load_dataset(
+                    self.repo_id, split="train", streaming=True, num_rows=3
+                )
+                sample_data = list(dataset.take(3))  # Get the first 3 rows
+            except Exception as e:
+                logger.warning(f"Failed to load dataset sample: {e}")
+                sample_data = "Could not load data sample"
+
+            # Prepare the view
+            view = {
+                "dataset_id": self.repo_id,
+                "dataset_info": dataset_info_serializable,
+                "sample_data": str(sample_data),
+                "tables": self.tables,  # Add list of tables in the DuckDB connection
+            }
+
+            return view
+
+        except Exception as e:
+            logger.error(f"Failed to view dataset {self.repo_id}: {e}")
+            return {"error": str(e)}
+
+    def query(self, sql: str) -> pd.DataFrame:
+        """Execute SQL query against loaded datasets.
+
+        Args:
+            sql: SQL query string
+
+        Returns:
+            Query results as pandas DataFrame
+
+        Raises:
+            duckdb.Error: On invalid SQL syntax
+        """
+        try:
+            logger.debug(f"Executing query: {sql}")
+            return self.con.execute(sql).fetchdf()
+        except duckdb.Error as e:
+            logger.error(f"Query failed: {sql}\nError: {str(e)}")
+            raise
 
     def sql(self, query: str) -> pd.DataFrame:
         """Execute a SQL query and return the result as a Pandas DataFrame."""
